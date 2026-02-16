@@ -1,0 +1,52 @@
+data:
+  dataset_dir: /home/ohnuma/20251228_WiltTracker/dataset_v2
+  img_size:
+  - 224
+  - 224
+  past_frames: 5
+  past_jitter_prob: 0.0
+  past_jitter_std: 0.1
+  past_stride: 5
+  past_window_minutes: 30
+evaluation:
+  vis_freq: 20
+  visualize: true
+experiment:
+  name: ablation_case3_loss_s42
+  project: runs
+  seed: 42
+model:
+  backbone: densenet121
+  dropout: 0.1
+  multi_head: true
+  name: decoupled_tracker
+  pretrained: true
+training:
+  batch_size: 512
+  device: cuda
+  epochs: 300
+  feature_dropout_p: 0.3
+  learning_rate: 0.001
+  patience: 40
+  stages:
+  - min_epochs: 30
+    name: 'Stage 3: Reward-Based Refinement'
+    past_jitter_prob: 0.0
+    past_jitter_std: 0.5
+    patience: 20
+    reward_eval_freq: 5
+    reward_patience: 5
+    rgb_dropout_p: 0.2
+    sequence_dropout_p: 0.2
+    use_conf: false
+    use_reward_early_stopping: true
+    w_attn: 10.0
+    w_consistency: 5.0
+    w_temporal: 0.0
+  use_wing: true
+  w_attn: 10.0
+  w_box: 5.0
+  w_conf: 0.0
+  w_consistency: 0.0
+  w_kpt: 50.0
+  w_temporal: 0.0

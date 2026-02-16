@@ -1,0 +1,25 @@
+# WiltTracker 検証モード設定
+# 正解ラベルなしの画像群に対し，YOLOv11 初期検出 → WiltTracker 自己回帰追跡を行う
+
+detection:
+  weights: weights/YOLOv11_detect.pt   # YOLOv11 葉検出モデル
+  conf_threshold: 0.3                  # 検出信頼度の閾値
+  top_n: 5                             # 追跡対象の葉の最大数
+
+tracking:
+  weights: weights/WiltTracker.pt      # WiltTracker 追跡モデル
+  backbone: densenet121                # モデル構造（ロード時に必要）
+  multi_head: true                     # マルチヘッド出力
+  past_frames: 5                       # 参照する過去フレーム数
+  past_stride: 5                       # 過去フレームの間隔（分）
+  use_mixed_stride: true               # 不規則な時間間隔を使用
+
+input:
+  image_dir: /home/ohnuma/20251228_WiltTracker/legacy/images/33/20250507
+  time_range: ["07:00", "17:00"]       # 追跡時間帯
+
+output:
+  dir: results                         # 出力ルートディレクトリ
+  save_images: true                    # 可視化画像を保存
+  save_video: true                     # 可視化動画を保存
+  save_csv: true                       # YOLO形式トラッキング CSV を保存
