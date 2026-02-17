@@ -2,33 +2,103 @@
 
 葉の萎凋追跡モデル WiltTracker の訓練・評価パイプライン.
 
+## モデルアーキテクチャ
+
+![WiltTracker モデル概要](model.svg)
+
 ## ディレクトリ構造
 
 ```
 WiltTracker-Training/
-├── train.py              # 訓練スクリプト
-├── eval.py               # 検証モード（推論 + 可視化）
+├── train.py                     # 訓練スクリプト
+├── eval.py                      # 検証モード（推論 + 可視化）
 ├── configs/
-│   ├── train.yaml        # 訓練設定
-│   └── eval.yaml         # 検証設定
+│   ├── train.yaml               # 訓練設定
+│   └── eval.yaml                # 検証設定
+├── scripts/
+│   ├── prepare_dataset.py       # 訓練データセット作成
+│   └── evaluate_v3_4_recursive.py  # 再帰推論評価
 ├── weights/
-│   ├── YOLOv11_detect.pt # 葉検出モデル (YOLOv11)
-│   └── WiltTracker.pt    # 追跡モデル (WiltTracker)
-├── wilt_tracker/         # コアモジュール
-│   ├── models/           # DecoupledTracker, Loss
-│   ├── data/             # データセットクラス
-│   └── utils/            # geometry, visualization, plots
-├── runs/                 # 訓練結果
-└── results/              # 検証結果
+│   ├── YOLOv11_detect.pt        # 葉検出モデル (YOLOv11)
+│   └── WiltTracker.pt           # 追跡モデル (WiltTracker)
+├── wilt_tracker/                # コアモジュール
+│   ├── models/                  # DecoupledTracker, Loss
+│   ├── data/                    # データセットクラス
+│   └── utils/                   # geometry, visualization, plots
+├── runs/                        # 訓練結果
+└── results/                     # 検証結果
     └── {area}_{date}/
-        ├── images/       # 可視化画像
-        ├── video.mp4     # 可視化動画
-        └── tracking.csv  # YOLO形式トラッキング結果
+        ├── images/              # 可視化画像
+        ├── video.mp4            # 可視化動画
+        └── tracking.csv         # YOLO形式トラッキング結果
 ```
 
-## 訓練データ
+## 訓練データセットの作成
 
-dataset_v2 (`/home/ohnuma/20251228_WiltTracker/dataset_v2`) を使用.
+### 前提条件
+
+以下のディレクトリ構造でアノテーションデータと画像が配置されていること:
+
+```
+legacy/
+├── annotations/              # アノテーション CSV
+│   ├── 31_20250430.csv       # {area}_{date}.csv
+│   ├── 34_20251114.csv
+│   └── ...
+└── images/                   # 元画像
+    ├── 31/
+    │   └── 20250430/
+    │       ├── 31_04_HDR_20250430-0700.jpg
+    │       └── ...
+    └── 34/
+        └── 20251114/
+            └── ...
+```
+
+#### アノテーション CSV の列
+
+| 列名 | 説明 |
+|------|------|
+| `frame_index` | フレーム番号 |
+| `filename` | 画像ファイル名 |
+| `leaf_id` | 葉の ID |
+| `bbox_xmin`, `bbox_ymin`, `bbox_xmax`, `bbox_ymax` | BBox 座標（0-1 正規化） |
+| `base_x`, `base_y` | 葉の基部座標（0-1 正規化） |
+| `tip_x`, `tip_y` | 葉の先端座標（0-1 正規化） |
+| `image_width`, `image_height` | 元画像サイズ（ピクセル） |
+| `is_manual` | 手動アノテーションかどうか |
+
+### データセット生成
+
+```bash
+python scripts/prepare_dataset.py \
+  --csv_dir /path/to/legacy/annotations \
+  --image_root /path/to/legacy/images \
+  --output_dir /path/to/dataset_v2
+```
+
+#### 処理内容
+
+1. 各葉トラック（area, date, leaf_id の組み合わせ）について，7:00〜17:00 の全フレームの BBox 統計を計算
+2. `max(平均BBox幅, 平均BBox高さ) × 3.0` の固定領域を切り出し枠として決定
+3. 全フレームをこの固定枠で切り出し（画像外はゼロパディング）
+4. 切り出し領域に対する相対正規化座標（0-1）でラベルを生成
+
+#### 生成されるファイル
+
+```
+dataset_v2/
+├── images/
+│   ├── 31_0_20250430_0700.jpg    # {area}_{leaf_id}_{date}_{HHMM}.jpg
+│   └── ...
+└── labels/
+    ├── 31_0_20250430_0700.txt    # {area}_{leaf_id}_{date}_{HHMM}.txt
+    └── ...
+```
+
+ラベル形式: `class cx cy w h base_x base_y tip_x tip_y`（全て切り出し領域に対する 0-1 正規化座標）
+
+## 訓練データの内訳
 
 ### 対象区画・日付
 
@@ -90,7 +160,9 @@ output:                              # 出力設定
 | `data` | `dataset_dir`, `img_size`, `past_frames`, `past_stride` | データセットパス，入力サイズ，過去フレーム参照の設定 |
 | `model` | `backbone`, `multi_head`, `dropout` | モデル構造の指定 |
 | `training` | `epochs`, `batch_size`, `learning_rate`, `patience` | 学習ハイパーパラメータ |
-| `training.stages` | `w_attn`, `w_consistency`, `reward_*` | カリキュラム学習のステージ設定 |
+| `training` | `w_box`, `w_kpt`, `w_attn`, `w_consistency` | 損失関数の重み |
+| `training` | `rgb_dropout_p`, `sequence_dropout_p` | ドロップアウトによるデータ拡張 |
+| `training` | `use_reward_early_stopping`, `reward_*` | Reward-Based Early Stopping |
 | `experiment` | `name`, `seed` | 実験名とランダムシード |
 
 ## 出力形式
