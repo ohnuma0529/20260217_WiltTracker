@@ -337,13 +337,8 @@ def train_v2(args):
     use_mixed_stride = train_cfg['data'].get('use_mixed_stride', False)
     w_consistency_global = train_cfg['training'].get('w_consistency', 0.0)
     
-    # Check if ANY stage needs consistency (clean heatmap)
+    # Consistency loss requires clean heatmap
     use_clean_hm = w_consistency_global > 0
-    if config['training'].get('stages'):
-        for s in config['training']['stages']:
-            if s.get('w_consistency', w_consistency_global) > 0:
-                use_clean_hm = True
-                break
     
     train_ds = LeafTrackingDatasetV2(
         dataset_dir=train_cfg['data']['dataset_dir'],
@@ -393,17 +388,11 @@ def train_v2(args):
     # 3. Model
     print("Initializing Model V2...")
     
-    # Check if ANY stage needs confidence head
     w_conf_global = config['training'].get('w_conf', 1.0)
     use_conf = w_conf_global > 0
-    if config['training'].get('stages'):
-        for s in config['training']['stages']:
-            if s.get('w_conf', w_conf_global) > 0:
-                use_conf = True
-                break
     
     if not use_conf:
-        print("Disabling confidence head as w_conf is 0.0 in all stages.")
+        print("Disabling confidence head (w_conf=0).")
     
     model = DecoupledTracker(
         backbone=config['model']['backbone'], 
@@ -482,97 +471,33 @@ def train_v2(args):
         with open(results_file, 'w') as f:
             f.write('epoch,train_loss,val_loss,reward_err,base_err,tip_err,box_loss,kpt_loss,const_loss,loss_attn,val_box_loss,val_kpt_loss,val_const_loss,lr\n')
 
-    # Curriculum Setup
-    stages = config['training'].get('stages', [])
-    stage_idx = 0
-    stage_early_stopping = None
+    # Reward-Based Early Stopping (flat config)
     reward_early_stopping = None
-    total_epochs_trained = 0
+    if config['training'].get('use_reward_early_stopping', False):
+        reward_early_stopping = RewardEarlyStopping(
+            patience=config['training'].get('reward_patience', 5)
+        )
 
-    # Start Stage logic
-    start_stage = getattr(args, 'start_stage', 1)
-    if start_stage > 1 and stages:
-        print(f"\n>>>> Jumping directly to Stage {start_stage} <<<<")
-        stage_idx = start_stage - 1
+    # Dropout parameters
+    rgb_p = config['training'].get('rgb_dropout_p', 0.0)
+    seq_p = config['training'].get('sequence_dropout_p', 0.0)
+
+    # Override dataset jitter from training config
+    train_jitter_std = config['training'].get('past_jitter_std', config['data'].get('past_jitter_std', 0.0))
+    train_jitter_prob = config['training'].get('past_jitter_prob', config['data'].get('past_jitter_prob', 0.0))
+    train_ds.past_jitter_std = train_jitter_std
+    train_ds.past_jitter_prob = train_jitter_prob
+
+    # Override loss weights from training config
+    for weight_name in ['w_box', 'w_kpt', 'w_conf', 'w_temporal', 'w_consistency', 'w_attn']:
+        if weight_name in config['training']:
+            setattr(criterion, weight_name, config['training'][weight_name])
+
+    min_epochs = config['training'].get('min_epochs', 0)
 
     for epoch in range(start_epoch, epochs):
-        # Dynamic Curriculum Management
-        if stages:
-            if stage_idx < len(stages):
-                current_stage = stages[stage_idx]
-                if stage_early_stopping is None:
-                    # New Stage Initialization
-                    name = current_stage.get('name', f'Stage {stage_idx+1}')
-                    patience = current_stage.get('patience', config['training'].get('patience', 10))
-                    min_epochs = current_stage.get('min_epochs', 0)
-                    stage_early_stopping = StageEarlyStopping(patience=patience, min_epochs=min_epochs)
-                    
-                    # Reload best weights from previous stage (if any)
-                    if stage_idx > 0:
-                        best_path = weights_dir / 'best.pt'
-                        if best_path.exists():
-
-                            model.load_state_dict(torch.load(best_path, map_location=device))
-                            # Reset global early stopping best loss for the new stage context
-                            early_stopping.best_loss = None 
-                            early_stopping.counter = 0
-                    
-                    # Reward-Based ES Init
-                    if current_stage.get('use_reward_early_stopping', False):
-
-                        reward_early_stopping = RewardEarlyStopping(patience=current_stage.get('reward_patience', 5))
-
-                    # Apply Static Stage Hyperparams
-                    rgb_p = current_stage.get('rgb_dropout_p', config['training'].get('rgb_dropout_p', 0.2))
-                    seq_p = current_stage.get('sequence_dropout_p', config['training'].get('sequence_dropout_p', 0.2))
-
-                    # Update Dataset parameters dynamically
-                    if 'train_ds' in locals() and train_ds:
-                        train_ds.past_jitter_std = current_stage.get('past_jitter_std', config['data'].get('past_jitter_std', 0.0))
-                        train_ds.past_jitter_prob = current_stage.get('past_jitter_prob', config['data'].get('past_jitter_prob', 1.0))
-                        train_ds.use_mixed_stride = current_stage.get('use_mixed_stride', config['data'].get('use_mixed_stride', False))
-                    
-                    # Fully re-initialize Optimizer and Scheduler for the new stage
-                    new_lr = current_stage.get('learning_rate', config['training']['learning_rate'])
-                    optimizer = optim.Adam(
-                        model.parameters(), 
-                        lr=new_lr,
-                        weight_decay=config.get('optimizer', {}).get('weight_decay', 0.0)
-                    )
-                    
-                    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                        optimizer,
-                        mode='min',
-                        factor=config['training'].get('scheduler_factor', 0.1),
-                        patience=config['training'].get('scheduler_patience', 5)
-                    )
-
-                    
-                    freeze_backbone = current_stage.get('freeze_backbone', False)
-                    for param in model.backbone_rgb.parameters():
-                        param.requires_grad = not freeze_backbone
-                    
-                    # Apply Loss Weight Overrides
-                    for weight_name in ['w_box', 'w_kpt', 'w_conf', 'w_temporal', 'w_consistency', 'w_attn']:
-                        if weight_name in current_stage:
-                            setattr(criterion, weight_name, current_stage[weight_name])
-                
-
-            else:
-                current_stage = stages[-1]
-
-        else:
-            current_stage = None
-        
-        # Stage parameter overrides (if needed per-batch)
-        if current_stage:
-             rgb_p = current_stage.get('rgb_dropout_p', 0.0)
-             seq_p = current_stage.get('sequence_dropout_p', 0.0)
-        else:
-             rgb_p = config['training'].get('rgb_dropout_p', 0.0)
-             seq_p = config['training'].get('sequence_dropout_p', 0.0)
-                
         model.train()
+
         train_loss_accum = 0.0
         box_loss_accum = 0.0
         kpt_loss_accum = 0.0
@@ -612,11 +537,9 @@ def train_v2(args):
                 hm_input = hm
                 current_prev_conf = torch.ones(B, 1).to(device) * 0.95
             
-            if current_stage:
-                rgb_dropout_mode = current_stage.get('rgb_dropout_mode', 'noise')
-                if p_drop >= seq_p and p_drop < (seq_p + rgb_p):
-                    if rgb_dropout_mode == 'zeros':
-                        img_input = torch.zeros_like(img)
+            rgb_dropout_mode = config['training'].get('rgb_dropout_mode', 'noise')
+            if rgb_dropout_mode == 'zeros' and p_drop >= seq_p and p_drop < (seq_p + rgb_p):
+                img_input = torch.zeros_like(img)
                 
             # Input Construction
             x = torch.cat([img_input, hm_input], dim=1) # [B, 3 + 15, H, W]
@@ -722,25 +645,21 @@ def train_v2(args):
         scheduler.step(avg_val_loss)
         current_lr = optimizer.param_groups[0]['lr']
         
-        # Reward-Based Validation (Every X epochs)
+        # Reward-Based Validation
         rew, b_err, t_err = 0.0, 0.0, 0.0
-        if current_stage and current_stage.get('use_reward_early_stopping', False):
-            if (epoch - total_epochs_trained + 1) % current_stage.get('reward_eval_freq', 5) == 0:
+        reward_eval_freq = config['training'].get('reward_eval_freq', 5)
+        if reward_early_stopping is not None:
+            if (epoch + 1) % reward_eval_freq == 0:
                 print(f"\n[REWARD] Performing recursive validation...")
                 rew, b_err, t_err = perform_recursive_validation(model, device, config)
                 print(f"[REWARD] Error: {rew:.2f} (Base: {b_err:.2f}, Tip: {t_err:.2f})")
                 if reward_early_stopping(rew):
-                    print("  [NEW BEST REWARD] Saving extra model...")
+                    print("  [NEW BEST REWARD] Saving model...")
                     torch.save(model.state_dict(), weights_dir / 'best_reward.pt')
-                if reward_early_stopping.early_stop:
-                    stage_epoch = (epoch - total_epochs_trained + 1)
-                    stage_min_epochs = current_stage.get('min_epochs', 0)
-                    if stage_epoch >= stage_min_epochs:
-                        print(f"\n[STAGING] Reward converged (Patiently waited {stage_min_epochs} epochs). Stopping training.")
-                        torch.save(model.state_dict(), weights_dir / 'last.pt')
-                        break # Exit training loop and proceed to evaluation
-                    else:
-                        print(f"  [REWARD] Converged but waiting for min_epochs ({stage_epoch}/{stage_min_epochs})...")
+                if reward_early_stopping.early_stop and (epoch + 1) >= min_epochs:
+                    print(f"Reward converged. Stopping training at epoch {epoch+1}.")
+                    torch.save(model.state_dict(), weights_dir / 'last.pt')
+                    break
 
         print(f"Epoch {epoch+1} | Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f} | Reward: {rew:.2f} | LR: {current_lr:.1e}")
         
@@ -763,21 +682,13 @@ def train_v2(args):
         if (epoch + 1) % 5 == 0:
             save_attention_snapshot(model, device, save_dir, epoch + 1, dataset_dir=train_cfg['data']['dataset_dir'])
         if epoch + 1 >= 50 and early_stopping.early_stop:
-            print(f"Early stopping entire training at epoch {epoch+1}")
+            print(f"Early stopping at epoch {epoch+1}")
             break
              
         # Cleanup memory at epoch end
         torch.cuda.empty_cache()
         import gc
         gc.collect()
-
-        # Transitions (Stage level early stopping is separate)
-        if 'stage_early_stopping' in locals() and stage_early_stopping and stages and stage_idx < len(stages):
-            if stage_early_stopping(avg_val_loss):
-
-                stage_idx += 1
-                total_epochs_trained = epoch + 1
-                stage_early_stopping = None # Reset for next stage
             
         if epoch % 5 == 0:
             torch.save(model.state_dict(), weights_dir / f'epoch_{epoch}.pt')

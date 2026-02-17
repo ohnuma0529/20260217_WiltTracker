@@ -1,52 +1,56 @@
+# WiltTracker 訓練設定
+
 data:
   dataset_dir: /home/ohnuma/20251228_WiltTracker/dataset_v2
-  img_size:
-  - 224
-  - 224
-  past_frames: 5
-  past_jitter_prob: 0.0
-  past_jitter_std: 0.1
-  past_stride: 5
-  past_window_minutes: 30
-evaluation:
-  vis_freq: 20
-  visualize: true
-experiment:
-  name: ablation_case3_loss_s42
-  project: runs
-  seed: 42
+  img_size: [224, 224]
+  past_frames: 5                    # 参照する過去フレーム数
+  past_stride: 5                    # 過去フレームの間隔（分）
+  past_window_minutes: 30           # 過去フレーム探索窓（分）
+  past_jitter_std: 0.1              # 過去フレーム位置のジッター標準偏差
+  past_jitter_prob: 0.0             # ジッター適用確率（0 = 無効）
+
 model:
-  backbone: densenet121
-  dropout: 0.1
-  multi_head: true
-  name: decoupled_tracker
-  pretrained: true
+  backbone: densenet121             # バックボーン構造
+  pretrained: true                  # ImageNet 事前学習の使用
+  multi_head: true                  # BBox/Base/Tip 独立ヘッド
+  dropout: 0.1                      # ドロップアウト率
+
 training:
-  batch_size: 512
-  device: cuda
   epochs: 300
-  feature_dropout_p: 0.3
+  batch_size: 512
   learning_rate: 0.001
-  patience: 40
-  stages:
-  - min_epochs: 30
-    name: 'Stage 3: Reward-Based Refinement'
-    past_jitter_prob: 0.0
-    past_jitter_std: 0.5
-    patience: 20
-    reward_eval_freq: 5
-    reward_patience: 5
-    rgb_dropout_p: 0.2
-    sequence_dropout_p: 0.2
-    use_conf: false
-    use_reward_early_stopping: true
-    w_attn: 10.0
-    w_consistency: 5.0
-    w_temporal: 0.0
-  use_wing: true
-  w_attn: 10.0
-  w_box: 5.0
-  w_conf: 0.0
-  w_consistency: 0.0
-  w_kpt: 50.0
-  w_temporal: 0.0
+  device: cuda
+  patience: 40                      # Early Stopping の忍耐値
+
+  # 損失関数の重み
+  w_box: 5.0                        # BBox 損失
+  w_kpt: 50.0                       # Keypoint 損失
+  w_attn: 10.0                      # Attention 損失
+  w_conf: 0.0                       # 信頼度損失（0 = 無効）
+  w_temporal: 0.0                   # 時系列平滑化損失（0 = 無効）
+  w_consistency: 5.0                # 一貫性損失
+  use_wing: true                    # Wing Loss の使用
+
+  # ドロップアウト（データ拡張）
+  feature_dropout_p: 0.3            # 特徴量ドロップアウト
+  rgb_dropout_p: 0.2                # RGB 入力ドロップアウト
+  sequence_dropout_p: 0.2           # 過去フレーム系列ドロップアウト
+
+  # Reward-Based Early Stopping
+  use_reward_early_stopping: true   # Reward ベースの早期停止
+  reward_eval_freq: 5               # Reward 評価頻度（epoch 毎）
+  reward_patience: 5                # Reward 改善なし忍耐値
+  min_epochs: 30                    # 最低訓練 epoch 数
+
+  # ステージ固有の過去フレームジッター
+  past_jitter_std: 0.5              # 訓練時のジッター標準偏差
+  past_jitter_prob: 0.0             # 訓練時のジッター確率
+
+evaluation:
+  visualize: true                   # バッチ可視化の保存
+  vis_freq: 20                      # 可視化頻度（epoch 毎）
+
+experiment:
+  name: wilttracker_train           # 実験名（runs/ 以下のディレクトリ名）
+  project: runs                     # 出力ルート
+  seed: 42                          # ランダムシード
